@@ -162,8 +162,169 @@ void get_token_security_context(TOKEN *TOKEN_INFO)
     }
 }
 
+void get_token_information(TOKEN *TOKEN_INFO)
+{
+    DWORD returned_tokinfo_lenght;
+    if(!GetTokenInformation(TOKEN_INFO->token_handle, TokenStatistics, NULL, 0, &returned_tokinfo_lenght))
+    {
+        PTOKEN_STATISTICS TokenStatisticsInformation = (PTOKEN_STATISTICS)GlobalAlloc(GPTR, returned_tokinfo_lenght);
+        if (GetTokenInformation(TOKEN_INFO->token_handle, TokenStatistics, TokenStatisticsInformation, returned_tokinfo_lenght, &returned_tokinfo_lenght))
+        {
+            if(TokenStatisticsInformation->TokenType == TokenPrimary)
+            { wcscpy_s(TOKEN_INFO->TokenType, TOKEN_TYPE_LENGHT, L"TokenPrimary"); }
+
+            else if(TokenStatisticsInformation->TokenType == TokenImpersonation)
+            { wcscpy_s(TOKEN_INFO->TokenType, TOKEN_TYPE_LENGHT, L"TokenImpersonation"); }
+        }
+    }
+}
+
+LPWSTR GetObjectInfo(HANDLE hObject, OBJECT_INFORMATION_CLASS objInfoClass)
+{
+    LPWSTR data = NULL;
+    DWORD dwSize = sizeof(OBJECT_NAME_INFORMATION);
+    POBJECT_NAME_INFORMATION pObjectInfo = (POBJECT_NAME_INFORMATION)malloc(dwSize);
+
+    NTSTATUS ntReturn = NtQueryObject(hObject, objInfoClass, pObjectInfo, dwSize, &dsize);
+    if((ntReturn == STATUS_BUFFER_OVERFLOW) || (ntReturn == STATUS_INFO_LENGHT_MISMATCH))
+    {
+        pObjectInfo = (POBJECT_NAME_INFORMATION)realloc(pObjectInfo, dwSize);
+        ntReturn = NtQueryObject(hObject, objInfoClass, pObjectInfo, dwSize, &dwSize);
+    }
+    
+    if ((ntReturn >= STATUS_SUCCESS) && (pObjectInfo->Buffer != NULL))
+    {
+        data = (LPWSTR)calloc(pObjectInfo->Lenght, sizeof(WCHAR));
+        CopyMemory(data, pObjectInfo->Buffer, pObjectInfo->Lenght);
+    }
+
+    free(pObjectInfo);
+    return data;
+}
 
 int wmain(int argc, wchar_t *argv[])
 {
+    HANDLE hToken;
+    DWORD cbSize;
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+    OpenProcessToken(hprocess, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken);
+    GetTokenInformation(hToken, TokenIntegrityLevel, NULL, 0, &cbSize);
+
+    PTOKEN_MANDATORY_LABEL pTIL = (PTOKEN_MANDATORY_LABEL)LocalAlloc(0, cbSize);
+    GetTokenInformation(hToken, TokenIntegrityLevel, pTIL, cbSize, &cbSize);
+
+    DWORD integrity_level = (DWORD) *GetSidSubAuthority(pTIL->Label.Sid, (DWORD)(UCHAR)(*GetSidSubAuthorityCount(pTIL->Label.Sid) - 1));
+
+    if(integrity_level < SECURITY_MANDATORY_HIGH_RID)
+    {
+        printf("Low privilege error!!1!\n");
+        return 1
+    }
+
+    TOKEN_PRIVILEGES tp;
+    LUID luidSeAssignPrimaryTokenPrivilege;
+    printf("+ Enabling SeAssignPrimaryToken\n");
+    
+    if(LookupPrivilegeValue(NULL, SE_ASSIGNPRIMARYTOKEN_NAME, &luidSeAssignPrimaryTokenPrivilege) == 0)
+    { printf("\t- SeAssignPrimaryToken not owned\n"); }
+
+    else
+    { printf("\t+ SeAssignPrimaryToken owned!1!!"); }
+
+    tp.privilegeCount = 1;
+    tp.Privileges[0].Luid = luidSeAssignPrimaryTokenPrivilege;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    
+    if(AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL) == 0)
+    { printf("\t- SeAssignPrimaryToken adjust token failed: %d\n", GetLastError()); }
+
+    else 
+    { printf("\t+ SeAssignPrimaryToken enabled!1!!\n"); }
+
+    LUID luidSeDebugPrivilege;
+    printf("+ Enabling SeDebugPrivilege\n");
+    if(LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &luidSeDebugPrivilege) == 0)
+    { printf("\t- SeDebugPrivilege not owned!1!!\n"); }
+    
+    else
+    { printf("\t+ SeDebugPrivilege owned!1!!\n"); }
+
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luidSeDebugPrivilege;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    if (AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL) == 0)
+    { printf("\t- SeDebugPrivilege adjust token failed: %d\n", GetLastError()); }
+    else
+    { printf("\t+ SeDebugPrivilege enabled!1!!\n"); }
+
+    CloseHandle(hProcess);
+    CloseHandle(hToken);
+
+    ULONG ReturnLenght = 0;
+    TOKEN found_tokens[100];
+    int nbrsfoundtokens = 0;
+
+    fNtQuerySystemInformation fNtQuerySystemInformation = (fNtQuerySystemInformation)GetProcAddress(GetModuleHandle(L"ntdll"), "NtQuerySystemInformation");
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = (PSYSTEM_HANDLE_INFORMATION)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SystemHandleInformationize);
+    NtQuerySystemInformation(SystemHandleInformation, handleTableInformation, SystemHandleInformationize, &returnLenght);
+
+    for (DWORD i = 0; i < handleTableInformation->NumberOfHandles; i++)
+    {
+        SYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (SYSTEM_HANDLE_TABLE_ENTRY_INFO)handleTableInformation->Handles[i];
+
+        HANDLE process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handleInfo.ProcessId);
+        if(process == INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(process);
+            continue;
+        }
+
+        HANDLE dupHandle;
+        if(DuplicateHandle(process, (HANDLE)handleInfo.HandleValue, GetCurrentProcess(), &dupHandle, 0, FALSE, DUPLICATE_SAME_ACCESS) == 0)
+        {
+            CloseHandle(process);
+            continue;
+        }
+
+        POBJECT_NAME_INFORMATION objectTypeInfo = (POBJECT_TYPE_INFORMATION)malloc(8192);
+        if(wcscmp(GetObjectInfo(dupHandle, ObjectTypeInformation), L"Token"))
+        {
+            CloseHandle(process);
+            CloseHandle(dupHandle);
+            continue;
+        }
+
+        TOKEN TOKEN_INFO;
+        TOKEN_INFO.token_handle = dupHandle;
+        get_token_owner_info(&TOKEN_INFO);
+        get_token_user_info(&TOKEN_INFO);
+        get_token_information(&TOKEN_INFO);
+
+        if(wcscmp(TOKEN_INFO.TokenType, L"TokenPrimary") != 0)
+        {
+            get_token_security_context(&TOKEN_INFO);
+        } else {
+            wcscpy_s(TOKEN_INFO.TokenImpersonationLevel, TOKEN_TYPE_LENGHT, L" ");
+        }
+
+        int is_new_token = 0;
+        for (int j = 0; j <= nbrsfoundtokens; j++)
+        {
+            if(wcscmp(found_tokens[j].user_name, TOKEN_INFO.user_name) == 0 && wcscmp(found_tokens[j].TokenType, TOKEN_INFO,TokenType) == 0 && wcscmp(found_tokens[j].TokenImpersonationLevel, TOKEN_INFO.TokenImpersonationLevel) == 0)
+            {
+                is_new_token = 1;
+            }
+        }
+    }
+
+    if(is_new_token == 0)
+    {
+        TOKEN_INFO.token_id = nbrsfoundtokens;
+        found_tokens[nbrsfoundtokens] = TOKEN_INFO;
+        nbrsfoundtokens += 1;
+    }
+
+    CloseHandle(process);
     return 0;
 }
