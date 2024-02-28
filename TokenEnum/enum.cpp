@@ -1,8 +1,7 @@
 /*
  * Author: Arthur (RTHXR)
  * 27/02/2024
- *
- * STATUS: IN PROGRESS
+ * Terminated on 27/02 22h00
  */
 
 #include<stdio.h>
@@ -316,15 +315,22 @@ int wmain(int argc, wchar_t *argv[])
                 is_new_token = 1;
             }
         }
+        if(is_new_token == 0)
+        {
+            TOKEN_INFO.token_id = nbrsfoundtokens;
+            found_tokens[nbrsfoundtokens] = TOKEN_INFO;
+            nbrsfoundtokens += 1;
+        }
+
+    CloseHandle(process);    
+    
     }
 
-    if(is_new_token == 0)
+    printf("\n+ Listing available tokens\n");
+    for (int k = 0; k < nbrsfoundtokens; k++)
     {
-        TOKEN_INFO.token_id = nbrsfoundtokens;
-        found_tokens[nbrsfoundtokens] = TOKEN_INFO;
-        nbrsfoundtokens += 1;
+        printf("[ID: %d][%ws][%ws] Owner: %ws User: %ws\n", found_tokens[k].token_id, found_tokens[k].TokenType, found_tokens[k].TokenImpersonationLevel, found_tokens[k].owner_name, found_tokens[k].user_name);    
     }
-
-    CloseHandle(process);
+    
     return 0;
 }
